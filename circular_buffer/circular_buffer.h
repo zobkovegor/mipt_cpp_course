@@ -11,318 +11,343 @@ constexpr std::size_t DYNAMIC_CAPACITY = std::numeric_limits<std::size_t>::max()
 template<typename T, std::size_t Capacity>
 class container {
  private:
-   std::byte arr_[sizeof(T) * Capacity];
+
+  alignas(T) std::byte arr_[sizeof(T) * Capacity];
+ 
  public:
+
   container() = default;
+
   container(std::size_t cap) {
     if (cap != Capacity) {
       throw std::invalid_argument("failed");
     }
   }
+
   T* data() { 
     return reinterpret_cast<T*>(arr_);
   }
+
   const T* data() const { 
     return reinterpret_cast<const T*>(arr_);
   }
+
   static constexpr std::size_t capacity() {
     return Capacity;
   }
+
   T& operator[](size_t i) {
     return reinterpret_cast<T*>(arr_)[i];
   }
+  
   const T& operator[](size_t i) const {
     return reinterpret_cast<const T*>(arr_)[i];
   }
+
 };
 
 template <typename T>
 class container<T, DYNAMIC_CAPACITY> {
  private:
+
   T* arr_;
+  
   size_t cap_;
+
   void createArr(size_t newcap) {
     arr_ = reinterpret_cast<T*>(new std::byte[newcap * sizeof(T)]);
   }
+
  public:
   container() = delete;
+
   container(std::size_t capacity) : cap_(capacity) {
     createArr(cap_);
   }
+  
   container(const container& other) : cap_(other.cap_) {
     createArr(cap_);
   }
+
   ~container() {
     delete[] reinterpret_cast<std::byte*>(arr_);
   }
+
   const T* data() const {
     return arr_;
   }
+
   T* data() {
     return arr_;
   }
+
   std::size_t capacity() const {
     return cap_;
   }
+
   T& operator[](size_t i) {
     return arr_[i];
   }
+
   const T& operator[](size_t i) const {
     return arr_[i];
   }
+
 };
 
 template <typename T, std::size_t Capacity = DYNAMIC_CAPACITY>
 class CircularBuffer {
  private:
-  container<T, Capacity> arr_;
+
+  container<T, Capacity>* arr_;
   size_t size_ = 0;
   size_t head_ = 0;
-  size_t tail_ = 0;
-  void deleteArr() {
-    for (size_t i = 0; i < size_; ++i) {
-      arr_.data()[head_].~T();
-      head_ = (head_ + 1) % capacity();
+  
+
+  using SpanType = std::conditional_t<
+  Capacity == DYNAMIC_CAPACITY,
+  std::span<T>,
+  std::span<T, Capacity>
+  >;
+
+  SpanType get_span() const {
+    if constexpr (Capacity == DYNAMIC_CAPACITY) {
+        return SpanType(arr_->data(), arr_->capacity());
+    } else {
+        return SpanType(arr_->data(), Capacity);
     }
   }
- public: 
-  CircularBuffer(std::size_t cap = Capacity) : arr_(cap) {}
-  CircularBuffer(const CircularBuffer<T, Capacity>& other) : arr_(other.capacity()), size_(0), head_(other.head_), tail_(other.tail_) {
+
+  void destroyAllElements() {
+    for (size_t i = 0; i < size_; ++i) {
+      std::destroy_at(arr_->data() + head_);
+      head_ = modCapacity(head_, 1);
+    }
+  }
+
+  size_t modCapacity(size_t first_elem, size_t second_elem) const {
+    return (first_elem + second_elem) % capacity();
+  }
+
+  void swap(CircularBuffer& other) {
+    std::swap(arr_, other.arr_);
+    std::swap(size_, other.size_);
+    std::swap(head_, other.head_);
+  }
+ public:
+
+  explicit CircularBuffer(size_t cap = Capacity) {
+    arr_ = new container<T, Capacity>(cap);
+  }
+
+  CircularBuffer(const CircularBuffer<T, Capacity>& other) : size_(0), head_(other.head_) { 
+    arr_ = new container<T, Capacity>(other.capacity());
     try {
       for (; size_ != other.size_; ++size_) {
-        new (arr_.data() + (size_ + head_) % capacity()) T(*(other.arr_.data() + (size_ + head_) % capacity()));
+        new (arr_->data() + modCapacity(size_, head_)) T(*(other.arr_->data() + (modCapacity(size_, head_))));
       }
     } catch (...) {
-      for (int i = 0; i != size_; ++i) {
-        (arr_.data() + (i + head_) % capacity())->~T();
+      for (size_t i = 0; i != size_; ++i) {
+        std::destroy_at((arr_->data() + modCapacity(i, head_)));
       }
       throw;
     }
   }
+
   CircularBuffer& operator=(const CircularBuffer& other) {
-    deleteArr();
+    destroyAllElements();
     head_ = other.head_;
     size_ = 0;
-    tail_ = other.tail_;
     try {
       for (; size_ != other.size_; ++size_) {
-        new (arr_.data() + (size_ + head_) % capacity()) T(*(other.arr_.data() + (size_ + head_) % capacity()));
+        new (arr_->data() + modCapacity(size_, head_)) T(*(other.arr_->data() + modCapacity(size_, head_)));
       }
     } catch (...) {
-      for (int i = 0; i != size_; ++i) {
-        (arr_.data() + (i + head_) % capacity())->~T();
+      for (size_t i = 0; i != size_; ++i) {
+        std::destroy_at((arr_->data() + modCapacity(head_, i)));
       }
       throw;
     }
     return *this;
   }
+
   size_t size() const {
     return size_;
   }
+
   bool empty() const {
     return size_ == 0;
-  } 
-  size_t capacity() const {
-    return arr_.capacity();
   }
+
+  size_t capacity() const {
+    return arr_->capacity();
+  }
+
   bool full() const {
     return size_ == capacity();
   }
+
   void push_back(T elem) {
     if (full()) {
-      std::swap(arr_.data()[head_], elem);
-      head_ = (head_ + 1) % capacity();
+      std::swap(arr_->data()[head_], elem);
+      head_ = modCapacity(head_, 1);
       --size_;
     } else {
       try {
-        new (arr_.data() + tail_) T(elem);
+        new (arr_->data() + modCapacity(head_, size_)) T(elem);
       } catch (...) {
         throw;
       }
     }
-    tail_ = (tail_ + 1) % capacity();
     ++size_;
   }
+
   void push_front(T elem) {
     if (full()) {
-      tail_ = (tail_ - 1 + capacity()) % capacity();
-      std::swap(arr_.data()[tail_], elem);
+      std::swap(arr_->data()[modCapacity(head_ + size_, capacity() - 1)], elem);
       --size_;
     } else {
       try {
-        new (arr_.data() + (head_ - 1  + capacity()) % capacity()) T(elem);
+        new (arr_->data() + modCapacity(head_, capacity() - 1)) T(elem);
       } catch (...) {
         throw;
       }
     }
-    head_ = (head_ - 1 + capacity()) % capacity();
+    head_ = modCapacity(head_, capacity() - 1);
     ++size_;
   }
+
   void pop_back() {
-    tail_ = (tail_ - 1 + capacity()) % capacity();
-    arr_.data()[tail_].~T();
+    std::destroy_at(arr_->data() + modCapacity(head_ + size_, capacity() - 1));
     --size_;
   }
+
   void pop_front() {
-    arr_.data()[head_].~T();
-    head_ = (head_ + 1) % capacity();
+    std::destroy_at(arr_->data() + head_);
+    head_ = modCapacity(head_, 1);
     --size_;
   }
+
   T& operator[](size_t i) {
-    return arr_[(head_ + i) % capacity()];
+    return (*arr_)[modCapacity(head_, i)];
   }
+
   const T& operator[](size_t i) const {
-    return arr_[(head_ + i) % capacity()];
+    return (*arr_)[modCapacity(head_, i)];
   }
+  
   T& at(size_t i) {
     if (i < 0 || i >= size_) {
       throw std::out_of_range("Index out of range");
     }
-    return arr_[(head_ + i) % capacity()];
+    return (*arr_)[modCapacity(head_, i)];
   }
+
   const T& at(size_t i) const {
     if (i < 0 || i >= size_) {
       throw std::out_of_range("Index out of range");
     }
-    return arr_[(head_ + i) % capacity()];
+    return (*arr_)[modCapacity(head_, i)];
   }
+
   ~CircularBuffer() {
-    deleteArr();
+    destroyAllElements();
+    delete arr_;
   }
 
-  class dynamIter {
-   protected:
-    size_t cap_ = 0;
-    dynamIter(size_t cap) : cap_(cap) {}
-    size_t capacity() const {
-      return cap_;
-    }
-  };
+  template <bool IsConst>
+  class base_iterator {
+  public:
+    using span_type = std::conditional_t<
+        Capacity == DYNAMIC_CAPACITY,
+        std::conditional_t<IsConst, const std::span<const T>, std::span<T>>,
+        std::conditional_t<IsConst, const std::span<const T, Capacity>, std::span<T, Capacity>>
+    >;
 
-  class statIter {
-    protected:
-     size_t capacity() const {
-       return Capacity;
-     }
-  };
-
-  using iter = std::conditional_t<Capacity == DYNAMIC_CAPACITY, dynamIter, statIter>;
-
-  template<bool IsConst>
-  class base_iterator : iter {
-   public:
-    using pointer_type = std::conditional_t<IsConst, const T*, T*>;
-    using reference_type = std::conditional_t<IsConst, const T&, T&>;
-    friend class CircularBuffer<T, Capacity>;
-  
-   private:
-    pointer_type arr_;
-    size_t head_;
-    size_t pos;
-    size_t size_;
-    base_iterator(pointer_type data, size_t head, size_t pos, size_t size)
-        : arr_(data), head_(head), pos(pos), size_(size) {}
-  
-    base_iterator(pointer_type data, size_t head, size_t pos, size_t size, size_t cap)
-        : iter(cap), arr_(data), head_(head), pos(pos), size_(size) {}
-  
-   public:
     using iterator_category = std::random_access_iterator_tag;
-    using value_type = T;
+    using value_type = std::conditional_t<IsConst, const T, T>;
     using difference_type = std::ptrdiff_t;
-    using pointer = pointer_type;
-    using reference = reference_type;
-  
-    base_iterator(const base_iterator&) = default;
-    base_iterator() : arr_(nullptr), head_(0), pos(0), size_(0) {}
-  
-    template<bool OtherIsConst, typename = std::enable_if_t<IsConst && !OtherIsConst>>
-    base_iterator(const base_iterator<OtherIsConst>& other)
-        : arr_(other.arr_), head_(other.head_), pos(other.pos), size_(other.size_) {}
-  
-    base_iterator& operator=(const base_iterator&) = default;
-  
-    reference_type operator*() const {
-      return arr_[(head_ + pos) % iter::capacity()];
-    }
-  
-    pointer_type operator->() const {
-      return arr_ + (head_ + pos) % iter::capacity();
-    }
-  
-    base_iterator& operator++() {
-      if (pos < size_) {
-        ++pos;
-      }
-      return *this;
-    }
-  
-    base_iterator operator++(int) {
-      base_iterator copy = *this;
-      if (pos < size_) { 
-        ++pos;
-      }
-      return copy;
-    }
-  
-    base_iterator& operator--() {
-      if (pos > 0) {
-        --pos;
-      }
-      return *this;
-    }
-  
-    base_iterator operator--(int) {
-      base_iterator copy = *this;
-      if (pos > 0) { 
-        --pos;
-      }
-      return copy;
-    }
-  
-    base_iterator& operator+=(int x) {
-      pos += x;
-      if (pos > size_) {
-        pos = size_;
-      }
-      return *this;
-    }
-    
-    friend base_iterator operator+(int x, const base_iterator& it) {
-      return (it + x);
+    using pointer = value_type*;
+    using reference = value_type&;
+
+    span_type span_;
+    size_t head_;
+    size_t pos_;
+
+    base_iterator(span_type span, size_t head, size_t pos)
+      : span_(span), head_(head), pos_(pos) {}
+
+    base_iterator() = default;
+
+    reference operator*() const {
+      return span_[(head_ + pos_) % span_.size()];
     }
 
-    base_iterator operator+(int x) const {
-      base_iterator copy = *this;
-      copy += x;
-      return copy;
+    pointer operator->() const {
+      return &span_[(head_ + pos_) % span_.size()];
     }
-  
-    base_iterator& operator-=(int x) {
-      if (x > static_cast<int>(pos)) {
-        pos = 0;
-      } else {
-        pos -= x;
-      }
+
+    base_iterator& operator++() {
+      ++pos_;
       return *this;
     }
-  
-    base_iterator operator-(int x) const {
-      base_iterator copy = *this;
-      copy -= x;
-      return copy;
+
+    base_iterator operator++(int) {
+      auto tmp = *this;
+      ++*this;
+      return tmp;
     }
-  
+
+    base_iterator& operator--() {
+      --pos_;
+      return *this;
+    }
+
+    base_iterator operator--(int) {
+      auto tmp = *this;
+      --*this;
+      return tmp;
+    }
+
+    base_iterator& operator+=(difference_type n) {
+      pos_ += n;
+      return *this;
+    }
+
+    friend base_iterator operator+(base_iterator it, difference_type n) {
+      it += n;
+      return it;
+    }
+
+    friend base_iterator operator+(difference_type n, base_iterator it) {
+      it += n;
+      return it;
+    }
+
+    friend base_iterator operator-(base_iterator it, difference_type n) {
+      it -= n;
+      return it;
+    }
+
+    base_iterator& operator-=(difference_type n) {
+      pos_ -= n;
+      return *this;
+    }
+
+    difference_type operator-(const base_iterator& other) const {
+      return pos_ - other.pos_;
+    }
+
     bool operator==(const base_iterator& other) const {
-      return head_ == other.head_ && pos == other.pos;
+      return pos_ == other.pos_ && span_.data() == other.span_.data();
     }
-  
+
     bool operator!=(const base_iterator& other) const {
       return !(*this == other);
     }
   
     bool operator<(const base_iterator& other) const {
-      return pos < other.pos;
+      return pos_ < other.pos_;
     }
   
     bool operator<=(const base_iterator& other) const {
@@ -336,10 +361,7 @@ class CircularBuffer {
     bool operator>=(const base_iterator& other) const {
       return *this > other || *this == other;
     }
-  
-    difference_type operator-(const base_iterator& other) const {
-      return static_cast<difference_type>(pos - other.pos);
-    }
+
   };
   
   using iterator = base_iterator<false>;
@@ -348,60 +370,41 @@ class CircularBuffer {
   using const_reverse_iterator = std::reverse_iterator<const_iterator>;
   
   iterator begin() {
-    if constexpr (Capacity == DYNAMIC_CAPACITY) {
-      return iterator(arr_.data(), head_, 0, size_, arr_.capacity());
-    } else {
-      return iterator(arr_.data(), head_, 0, size_);
-    }
+    return iterator(get_span(), head_, 0);
   }
-  
+
+  iterator end() {
+    return iterator(get_span(), head_, size_);
+  }
+
   const_iterator begin() const {
-    if constexpr (Capacity == DYNAMIC_CAPACITY) {
-      return const_iterator(arr_.data(), head_, 0, size_, arr_.capacity());
-    } else {
-      return const_iterator(arr_.data(), head_, 0, size_);
-    }
+    return const_iterator(get_span(), head_, 0);
+  }
+
+  const_iterator end() const {
+    return const_iterator(get_span(), head_, size_);
   }
   
   const_iterator cbegin() const {
-    if constexpr (Capacity == DYNAMIC_CAPACITY) {
-      return const_iterator(arr_.data(), head_, 0, size_, arr_.capacity());
-    } else {
-      return const_iterator(arr_.data(), head_, 0, size_);
-    }
-  }
-  
-  iterator end() {
-    if constexpr (Capacity == DYNAMIC_CAPACITY) {
-      return iterator(arr_.data(), head_, size_, size_, arr_.capacity());
-    } else {
-      return iterator(arr_.data(), head_, size_, size_);
-    }
-  }
-  
-  const_iterator end() const {
-    if constexpr (Capacity == DYNAMIC_CAPACITY) {
-      return const_iterator(arr_.data(), head_, size_, size_, arr_.capacity());
-    } else {
-      return const_iterator(arr_.data(), head_, size_, size_);
-    }
+    return begin();
   }
   
   const_iterator cend() const {
-    if constexpr (Capacity == DYNAMIC_CAPACITY) {
-      return const_iterator(arr_.data(), head_, size_, size_, arr_.capacity());
-    } else {
-      return const_iterator(arr_.data(), head_, size_, size_);
-    }
+    return end();
   }
   
   reverse_iterator rbegin() { return std::make_reverse_iterator(end()); }
+
   const_reverse_iterator rbegin() const { return std::make_reverse_iterator(end()); }
+
   reverse_iterator rend() { return std::make_reverse_iterator(begin()); }
+
   const_reverse_iterator rend() const { return std::make_reverse_iterator(begin()); }
+
   const_reverse_iterator crbegin() const { return std::make_reverse_iterator(cend()); }
+
   const_reverse_iterator crend() const { return std::make_reverse_iterator(cbegin()); }
-  
+
   void insert(iterator it, T elem) {
     while (it != end()) {
       std::swap(elem, *it);
@@ -409,6 +412,7 @@ class CircularBuffer {
     }
     push_back(elem);
   }
+  
   void erase(iterator it) {
     while (it != (end() - 1)) {
       std::swap(*it, *(it + 1));
