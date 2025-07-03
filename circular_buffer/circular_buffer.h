@@ -5,6 +5,7 @@
 #include <optional>
 #include <type_traits>
 #include <iterator>
+#include <memory>
 
 constexpr std::size_t DYNAMIC_CAPACITY = std::numeric_limits<std::size_t>::max();
 
@@ -32,7 +33,7 @@ class container {
     return reinterpret_cast<const T*>(arr_);
   }
 
-  static constexpr std::size_t capacity() {
+  constexpr std::size_t capacity() const {
     return Capacity;
   }
 
@@ -49,9 +50,7 @@ class container {
 template <typename T>
 class container<T, DYNAMIC_CAPACITY> {
  private:
-
   T* arr_;
-  
   size_t cap_;
 
   void createArr(size_t newcap) {
@@ -81,7 +80,7 @@ class container<T, DYNAMIC_CAPACITY> {
     return arr_;
   }
 
-  std::size_t capacity() const {
+    std::size_t capacity() const {
     return cap_;
   }
 
@@ -93,36 +92,39 @@ class container<T, DYNAMIC_CAPACITY> {
     return arr_[i];
   }
 
+  void swap(container& other) {
+    std::swap(arr_, other.arr_);
+    std::swap(cap_, other.cap_);
+  }
+
 };
 
 template <typename T, std::size_t Capacity = DYNAMIC_CAPACITY>
 class CircularBuffer {
  private:
 
-  container<T, Capacity>* arr_;
+
+  container<T, Capacity> arr_;
   size_t size_ = 0;
   size_t head_ = 0;
   
 
   using SpanType = std::conditional_t<
-  Capacity == DYNAMIC_CAPACITY,
-  std::span<T>,
-  std::span<T, Capacity>
+    Capacity == DYNAMIC_CAPACITY,
+    std::span<T>,
+    std::span<T, Capacity>
   >;
 
   SpanType get_span() const {
-    if constexpr (Capacity == DYNAMIC_CAPACITY) {
-        return SpanType(arr_->data(), arr_->capacity());
-    } else {
-        return SpanType(arr_->data(), Capacity);
-    }
+    return SpanType(const_cast<T*>(arr_.data()), arr_.capacity());
   }
 
   void destroyAllElements() {
     for (size_t i = 0; i < size_; ++i) {
-      std::destroy_at(arr_->data() + head_);
+      std::destroy_at(arr_.data() + head_);
       head_ = modCapacity(head_, 1);
     }
+    size_ = 0;
   }
 
   size_t modCapacity(size_t first_elem, size_t second_elem) const {
@@ -130,46 +132,47 @@ class CircularBuffer {
   }
 
   void swap(CircularBuffer& other) {
-    std::swap(arr_, other.arr_);
+    arr_.swap(other.arr_);
     std::swap(size_, other.size_);
     std::swap(head_, other.head_);
   }
+
  public:
 
-  explicit CircularBuffer(size_t cap = Capacity) {
-    arr_ = new container<T, Capacity>(cap);
-  }
+  explicit CircularBuffer(size_t cap = Capacity) : arr_(cap) {}
 
-  CircularBuffer(const CircularBuffer<T, Capacity>& other) : size_(0), head_(other.head_) { 
-    arr_ = new container<T, Capacity>(other.capacity());
+  CircularBuffer(const CircularBuffer<T, Capacity>& other) : arr_(other.capacity()), size_(0), head_(0) {
     try {
-      for (; size_ != other.size_; ++size_) {
-        new (arr_->data() + modCapacity(size_, head_)) T(*(other.arr_->data() + (modCapacity(size_, head_))));
+      for (size_t i = 0; i < other.size_; ++i) {
+        std::construct_at(arr_.data() + i, other[i]);
+        ++size_;
       }
     } catch (...) {
-      for (size_t i = 0; i != size_; ++i) {
-        std::destroy_at((arr_->data() + modCapacity(i, head_)));
-      }
+      destroyAllElements();
       throw;
     }
   }
 
-  CircularBuffer& operator=(const CircularBuffer& other) {
+  CircularBuffer& operator=(const CircularBuffer& other) requires (Capacity == DYNAMIC_CAPACITY) {
+    CircularBuffer tmp(other);
+    swap(tmp);
+    return *this;
+  }
+  
+  CircularBuffer& operator=(const CircularBuffer& other) requires (Capacity != DYNAMIC_CAPACITY) {
     destroyAllElements();
     head_ = other.head_;
     size_ = 0;
     try {
       for (; size_ != other.size_; ++size_) {
-        new (arr_->data() + modCapacity(size_, head_)) T(*(other.arr_->data() + modCapacity(size_, head_)));
+        std::construct_at(arr_.data() + modCapacity(size_, head_), *(other.arr_.data() + modCapacity(size_, head_)));
       }
     } catch (...) {
-      for (size_t i = 0; i != size_; ++i) {
-        std::destroy_at((arr_->data() + modCapacity(head_, i)));
-      }
+      destroyAllElements();
       throw;
     }
     return *this;
-  }
+  } 
 
   size_t size() const {
     return size_;
@@ -180,7 +183,7 @@ class CircularBuffer {
   }
 
   size_t capacity() const {
-    return arr_->capacity();
+    return arr_.capacity();
   }
 
   bool full() const {
@@ -189,95 +192,112 @@ class CircularBuffer {
 
   void push_back(T elem) {
     if (full()) {
-      std::swap(arr_->data()[head_], elem);
+      std::swap(arr_.data()[head_], elem);
       head_ = modCapacity(head_, 1);
       --size_;
     } else {
-      try {
-        new (arr_->data() + modCapacity(head_, size_)) T(elem);
-      } catch (...) {
-        throw;
-      }
+      std::construct_at(arr_.data() + modCapacity(head_, size_), elem);
     }
     ++size_;
   }
 
   void push_front(T elem) {
     if (full()) {
-      std::swap(arr_->data()[modCapacity(head_ + size_, capacity() - 1)], elem);
+      std::swap(arr_.data()[modCapacity(head_ + size_, capacity() - 1)], elem);
       --size_;
     } else {
-      try {
-        new (arr_->data() + modCapacity(head_, capacity() - 1)) T(elem);
-      } catch (...) {
-        throw;
-      }
+      std::construct_at(arr_.data() + modCapacity(head_, capacity() - 1), elem);
     }
     head_ = modCapacity(head_, capacity() - 1);
     ++size_;
   }
 
   void pop_back() {
-    std::destroy_at(arr_->data() + modCapacity(head_ + size_, capacity() - 1));
+    std::destroy_at(arr_.data() + modCapacity(head_ + size_, capacity() - 1));
     --size_;
   }
 
   void pop_front() {
-    std::destroy_at(arr_->data() + head_);
+    std::destroy_at(arr_.data() + head_);
     head_ = modCapacity(head_, 1);
     --size_;
   }
 
   T& operator[](size_t i) {
-    return (*arr_)[modCapacity(head_, i)];
+    return (arr_)[modCapacity(head_, i)];
   }
 
   const T& operator[](size_t i) const {
-    return (*arr_)[modCapacity(head_, i)];
+    return (arr_)[modCapacity(head_, i)];
   }
   
   T& at(size_t i) {
     if (i < 0 || i >= size_) {
       throw std::out_of_range("Index out of range");
     }
-    return (*arr_)[modCapacity(head_, i)];
+    return (arr_)[modCapacity(head_, i)];
   }
 
   const T& at(size_t i) const {
     if (i < 0 || i >= size_) {
       throw std::out_of_range("Index out of range");
     }
-    return (*arr_)[modCapacity(head_, i)];
+    return (arr_)[modCapacity(head_, i)];
   }
 
   ~CircularBuffer() {
     destroyAllElements();
-    delete arr_;
   }
 
   template <bool IsConst>
   class base_iterator {
-  public:
+   private:
     using span_type = std::conditional_t<
-        Capacity == DYNAMIC_CAPACITY,
-        std::conditional_t<IsConst, const std::span<const T>, std::span<T>>,
-        std::conditional_t<IsConst, const std::span<const T, Capacity>, std::span<T, Capacity>>
+      Capacity == DYNAMIC_CAPACITY,
+      std::conditional_t<IsConst, const std::span<const T>, std::span<T>>,
+      std::conditional_t<IsConst, const std::span<const T, Capacity>, std::span<T, Capacity>>
     >;
+    span_type span_;
+    size_t head_;
+    size_t pos_;
 
+    template <bool OtherIsConst>
+    friend class base_iterator;
+
+   public:
     using iterator_category = std::random_access_iterator_tag;
     using value_type = std::conditional_t<IsConst, const T, T>;
     using difference_type = std::ptrdiff_t;
     using pointer = value_type*;
     using reference = value_type&;
 
-    span_type span_;
-    size_t head_;
-    size_t pos_;
-
     base_iterator(span_type span, size_t head, size_t pos)
-      : span_(span), head_(head), pos_(pos) {}
+    : span_(span), head_(head), pos_(pos) {}
 
     base_iterator() = default;
+
+    base_iterator(const base_iterator& other) : span_(other.span_), head_(other.head_), pos_(other.pos_) {}
+
+    template <bool otherIsConst>
+    requires (IsConst)
+    base_iterator(const base_iterator<otherIsConst>& other) : span_(other.span_), head_(other.head_), pos_(other.pos_) {}
+
+    template <bool otherIsConst>
+    requires (IsConst)
+    base_iterator& operator=(const base_iterator<otherIsConst>& other) {
+      span_ = other.span_;
+      head_ = other.head_;
+      pos_ = other.pos_;
+      return *this;
+    }
+
+    base_iterator& operator=(const base_iterator& other) {
+      span_ = other.span_;
+      head_ = other.head_;
+      pos_ = other.pos_;
+      return *this;
+    }
+
 
     reference operator*() const {
       return span_[(head_ + pos_) % span_.size()];
